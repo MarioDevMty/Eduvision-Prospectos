@@ -26,7 +26,7 @@ def load_imap() -> dict:
 def print_results(results: dict) -> None:
     print()
     print("=" * 78)
-    print("SINCRONIZACIÓN AUTOMÁTICA DE BANDEJA - EDUVISION")
+    print("SINCRONIZACIÓN MANUAL DE BANDEJA - EDUVISION")
     print("=" * 78)
 
     if results.get("locked"):

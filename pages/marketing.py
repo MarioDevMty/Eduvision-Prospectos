@@ -1393,8 +1393,9 @@ def render_incidents(user_id: int):
         )
 
     st.caption(
-        "La tarea de Windows revisa INBOX cada 10 minutos. "
-        "El botón permite forzar una revisión inmediata."
+        "La bandeja se revisa únicamente cuando presionas este botón. "
+        "Se procesan solo mensajes nuevos mediante control incremental por UID; "
+        "no existe una consulta automática recurrente."
     )
 
     if st.button(
@@ -1420,7 +1421,7 @@ def render_incidents(user_id: int):
                 apply_changes=True,
                 mailbox="INBOX",
                 incremental=True,
-                source="STREAMLIT",
+                source="MANUAL_STREAMLIT",
             )
 
         if sync_result.get("locked"):

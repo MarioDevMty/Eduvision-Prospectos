@@ -43,10 +43,23 @@ CREATE TABLE IF NOT EXISTS campaign_recipients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
 
     campaign_id INTEGER NOT NULL,
-    campus_id INTEGER NOT NULL,
+
+    recipient_type TEXT NOT NULL
+        CHECK (
+            recipient_type IN (
+                'INSTITUCIONAL',
+                'CONTACTO'
+            )
+        ),
+
+    organization_id INTEGER NOT NULL,
+    campus_id INTEGER,
     contact_id INTEGER,
 
+    organization_name_snapshot TEXT NOT NULL,
+    recipient_name_snapshot TEXT,
     campus_name_snapshot TEXT,
+
     email_address TEXT NOT NULL,
 
     email_type TEXT NOT NULL DEFAULT 'INSTITUCIONAL'
@@ -71,6 +84,9 @@ CREATE TABLE IF NOT EXISTS campaign_recipients (
             )
         ),
 
+    is_active INTEGER NOT NULL DEFAULT 1
+        CHECK (is_active IN (0, 1)),
+
     sent_at TEXT,
     responded_at TEXT,
 
@@ -87,11 +103,26 @@ CREATE TABLE IF NOT EXISTS campaign_recipients (
     FOREIGN KEY (campaign_id)
         REFERENCES campaigns(id),
 
+    FOREIGN KEY (organization_id)
+        REFERENCES organizations(id),
+
     FOREIGN KEY (campus_id)
         REFERENCES campuses(id),
 
     FOREIGN KEY (contact_id)
         REFERENCES contacts(id),
+
+    CHECK (
+        (
+            recipient_type = 'INSTITUCIONAL'
+            AND contact_id IS NULL
+        )
+        OR
+        (
+            recipient_type = 'CONTACTO'
+            AND contact_id IS NOT NULL
+        )
+    ),
 
     UNIQUE (
         campaign_id,
@@ -133,10 +164,6 @@ CREATE TABLE IF NOT EXISTS email_activity (
         REFERENCES users(id)
 );
 
-
--- ========================================================
--- INTENTOS DE ENVÍO
--- ========================================================
 
 CREATE TABLE IF NOT EXISTS email_send_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -202,42 +229,41 @@ CREATE TABLE IF NOT EXISTS email_send_attempts (
 CREATE INDEX IF NOT EXISTS idx_campaigns_status
 ON campaigns(status);
 
-
 CREATE INDEX IF NOT EXISTS idx_campaign_recipients_campaign
 ON campaign_recipients(campaign_id);
 
+CREATE INDEX IF NOT EXISTS idx_campaign_recipients_organization
+ON campaign_recipients(organization_id);
 
 CREATE INDEX IF NOT EXISTS idx_campaign_recipients_campus
 ON campaign_recipients(campus_id);
 
+CREATE INDEX IF NOT EXISTS idx_campaign_recipients_contact
+ON campaign_recipients(contact_id);
+
+CREATE INDEX IF NOT EXISTS idx_campaign_recipients_type
+ON campaign_recipients(recipient_type);
 
 CREATE INDEX IF NOT EXISTS idx_campaign_recipients_status
 ON campaign_recipients(status);
 
-
 CREATE INDEX IF NOT EXISTS idx_campaign_recipients_email
 ON campaign_recipients(email_address);
-
 
 CREATE INDEX IF NOT EXISTS idx_email_activity_recipient
 ON email_activity(campaign_recipient_id);
 
-
 CREATE INDEX IF NOT EXISTS idx_send_attempts_recipient
 ON email_send_attempts(campaign_recipient_id);
-
 
 CREATE INDEX IF NOT EXISTS idx_send_attempts_message_id
 ON email_send_attempts(message_id);
 
-
 CREATE INDEX IF NOT EXISTS idx_send_attempts_recipient_email
 ON email_send_attempts(recipient_email);
 
-
 CREATE INDEX IF NOT EXISTS idx_send_attempts_bounce
 ON email_send_attempts(bounce_detected);
-
 
 CREATE INDEX IF NOT EXISTS idx_send_attempts_response
 ON email_send_attempts(response_detected);
@@ -246,8 +272,10 @@ ON email_send_attempts(response_detected);
 
 def create_marketing_schema() -> None:
     """
-    Crea las tablas necesarias para campañas,
-    destinatarios, actividad e intentos de envío.
+    Crea el esquema para instalaciones nuevas.
+
+    Una base ya existente debe migrarse primero con:
+        python scripts/migrate_marketing_bloque3.py
     """
 
     with get_connection() as connection:

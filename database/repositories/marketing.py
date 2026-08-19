@@ -23,7 +23,6 @@ def create_campaign(
 ) -> int:
 
     with get_connection() as connection:
-
         cursor = connection.execute(
             """
             INSERT INTO campaigns (
@@ -55,7 +54,6 @@ def create_campaign(
 def get_campaigns() -> list:
 
     with get_connection() as connection:
-
         return connection.execute(
             """
             SELECT
@@ -77,7 +75,6 @@ def get_campaign(
 ):
 
     with get_connection() as connection:
-
         return connection.execute(
             """
             SELECT *
@@ -108,7 +105,6 @@ def update_campaign_status(
         )
 
     with get_connection() as connection:
-
         connection.execute(
             """
             UPDATE campaigns
@@ -127,20 +123,234 @@ def update_campaign_status(
 
 
 # =========================================================
-# PLANTELES ELEGIBLES
+# DESTINATARIOS ELEGIBLES
 # =========================================================
 
-def get_eligible_campuses() -> list:
+def _deduplicate_eligible_rows(
+    rows,
+) -> list[dict]:
     """
-    Devuelve planteles que tienen al menos
-    un correo institucional activo.
+    Un correo se envía una sola vez por campaña.
 
-    No requiere que exista un contacto personal.
+    Si el mismo correo aparece como CONTACTO y como INSTITUCIONAL,
+    se conserva CONTACTO porque contiene mayor contexto de persona.
+    """
+
+    result = []
+    seen = set()
+
+    for row in rows:
+        item = dict(row)
+
+        key = (
+            item["email"]
+            or ""
+        ).strip().lower()
+
+        if not key:
+            continue
+
+        if key in seen:
+            continue
+
+        seen.add(
+            key
+        )
+        result.append(
+            item
+        )
+
+    return result
+
+
+def get_eligible_recipients(
+    include_institutional: bool = True,
+    include_contacts: bool = True,
+) -> list[dict]:
+    """
+    Devuelve todo el universo elegible de Marketing.
+
+    CONTACTO:
+        correo activo de una persona identificada.
+        Puede pertenecer a un plantel o directamente a la organización.
+
+    INSTITUCIONAL:
+        correo activo de un plantel o de la propia organización.
+
+    Los contactos se consultan primero para que, ante un correo duplicado,
+    prevalezca la identidad de persona.
+    """
+
+    parts = []
+    params = []
+
+    if include_contacts:
+        parts.append(
+            """
+            SELECT
+                'CONTACTO' AS recipient_type,
+
+                o.id AS organization_id,
+                o.official_name,
+                o.organization_type,
+                o.subsystem,
+                o.sector,
+
+                co.campus_id,
+                ca.campus_name,
+                ca.municipality,
+                ca.state,
+
+                co.id AS contact_id,
+                co.full_name AS recipient_name,
+                co.position,
+                co.area,
+
+                e.id AS email_id,
+                e.email,
+                'CONTACTO' AS campaign_email_type,
+                e.email_type AS source_email_type,
+                e.is_primary
+
+            FROM contacts co
+
+            JOIN organizations o
+              ON o.id = co.organization_id
+
+            LEFT JOIN campuses ca
+              ON ca.id = co.campus_id
+
+            JOIN emails e
+              ON e.entity_type = 'CONTACT'
+             AND e.entity_id = co.id
+             AND e.status = 'ACTIVO'
+
+            WHERE co.status <> 'BAJA'
+              AND o.status <> 'BAJA'
+              AND (
+                    co.campus_id IS NULL
+                    OR ca.status <> 'BAJA'
+                  )
+            """
+        )
+
+    if include_institutional:
+        parts.append(
+            """
+            SELECT
+                'INSTITUCIONAL' AS recipient_type,
+
+                o.id AS organization_id,
+                o.official_name,
+                o.organization_type,
+                o.subsystem,
+                o.sector,
+
+                c.id AS campus_id,
+                c.campus_name,
+                c.municipality,
+                c.state,
+
+                NULL AS contact_id,
+                c.campus_name AS recipient_name,
+                NULL AS position,
+                NULL AS area,
+
+                e.id AS email_id,
+                e.email,
+                'INSTITUCIONAL' AS campaign_email_type,
+                e.email_type AS source_email_type,
+                e.is_primary
+
+            FROM campuses c
+
+            JOIN organizations o
+              ON o.id = c.organization_id
+
+            JOIN emails e
+              ON e.entity_type = 'CAMPUS'
+             AND e.entity_id = c.id
+             AND e.status = 'ACTIVO'
+
+            WHERE c.status <> 'BAJA'
+              AND o.status <> 'BAJA'
+            """
+        )
+
+        parts.append(
+            """
+            SELECT
+                'INSTITUCIONAL' AS recipient_type,
+
+                o.id AS organization_id,
+                o.official_name,
+                o.organization_type,
+                o.subsystem,
+                o.sector,
+
+                NULL AS campus_id,
+                NULL AS campus_name,
+                NULL AS municipality,
+                NULL AS state,
+
+                NULL AS contact_id,
+                o.official_name AS recipient_name,
+                NULL AS position,
+                NULL AS area,
+
+                e.id AS email_id,
+                e.email,
+                'INSTITUCIONAL' AS campaign_email_type,
+                e.email_type AS source_email_type,
+                e.is_primary
+
+            FROM organizations o
+
+            JOIN emails e
+              ON e.entity_type = 'ORGANIZATION'
+             AND e.entity_id = o.id
+             AND e.status = 'ACTIVO'
+
+            WHERE o.status <> 'BAJA'
+            """
+        )
+
+    if not parts:
+        return []
+
+    query = "\nUNION ALL\n".join(
+        parts
+    )
+
+    query += """
+        ORDER BY
+            recipient_type ASC,
+            official_name,
+            campus_name,
+            recipient_name,
+            is_primary DESC,
+            email_id
     """
 
     with get_connection() as connection:
-
         rows = connection.execute(
+            query,
+            params,
+        ).fetchall()
+
+    return _deduplicate_eligible_rows(
+        rows
+    )
+
+
+def get_eligible_campuses() -> list:
+    """
+    Compatibilidad con código anterior.
+    Solo devuelve correos institucionales ligados a planteles.
+    """
+
+    with get_connection() as connection:
+        return connection.execute(
             """
             SELECT
                 c.id AS campus_id,
@@ -152,6 +362,7 @@ def get_eligible_campuses() -> list:
 
                 o.id AS organization_id,
                 o.official_name,
+                o.organization_type,
                 o.subsystem,
                 o.sector,
 
@@ -171,6 +382,7 @@ def get_eligible_campuses() -> list:
                AND e.status = 'ACTIVO'
 
             WHERE c.status <> 'BAJA'
+              AND o.status <> 'BAJA'
 
             ORDER BY
                 o.official_name,
@@ -180,13 +392,10 @@ def get_eligible_campuses() -> list:
             """
         ).fetchall()
 
-    return rows
-
 
 def get_eligible_campuses_count() -> int:
 
     with get_connection() as connection:
-
         row = connection.execute(
             """
             SELECT COUNT(DISTINCT c.id)
@@ -205,28 +414,16 @@ def get_eligible_campuses_count() -> int:
 
 
 def get_eligible_email_count() -> int:
-
-    with get_connection() as connection:
-
-        row = connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM emails e
-
-            JOIN campuses c
-                ON c.id = e.entity_id
-               AND e.entity_type = 'CAMPUS'
-
-            WHERE e.status = 'ACTIVO'
-              AND c.status <> 'BAJA'
-            """
-        ).fetchone()
-
-    return row[0] if row else 0
+    return len(
+        get_eligible_recipients(
+            include_institutional=True,
+            include_contacts=True,
+        )
+    )
 
 
 # =========================================================
-# DESTINATARIOS
+# DESTINATARIOS DE CAMPAÑA
 # =========================================================
 
 def recipient_exists(
@@ -235,13 +432,12 @@ def recipient_exists(
 ) -> bool:
 
     with get_connection() as connection:
-
         row = connection.execute(
             """
             SELECT id
             FROM campaign_recipients
             WHERE campaign_id = ?
-              AND LOWER(email_address) = LOWER(?)
+              AND LOWER(TRIM(email_address)) = LOWER(TRIM(?))
             LIMIT 1
             """,
             (
@@ -253,22 +449,260 @@ def recipient_exists(
     return row is not None
 
 
+def _resolve_recipient_identity(
+    connection,
+    recipient_type: str,
+    organization_id: int | None,
+    campus_id: int | None,
+    contact_id: int | None,
+    organization_name: str,
+    recipient_name: str,
+    campus_name: str,
+) -> dict:
+    recipient_type = (
+        recipient_type
+        or ""
+    ).strip().upper()
+
+    if recipient_type not in {
+        "INSTITUCIONAL",
+        "CONTACTO",
+    }:
+        recipient_type = (
+            "CONTACTO"
+            if contact_id is not None
+            else "INSTITUCIONAL"
+        )
+
+    if recipient_type == "CONTACTO":
+        if contact_id is None:
+            raise ValueError(
+                "Un destinatario CONTACTO requiere contact_id."
+            )
+
+        contact = connection.execute(
+            """
+            SELECT
+                co.id,
+                co.organization_id,
+                co.campus_id,
+                co.full_name,
+                o.official_name,
+                ca.campus_name
+            FROM contacts co
+            JOIN organizations o
+              ON o.id = co.organization_id
+            LEFT JOIN campuses ca
+              ON ca.id = co.campus_id
+            WHERE co.id = ?
+            """,
+            (
+                int(contact_id),
+            ),
+        ).fetchone()
+
+        if contact is None:
+            raise ValueError(
+                "El contacto seleccionado no existe."
+            )
+
+        resolved_organization_id = int(
+            contact["organization_id"]
+        )
+
+        if (
+            organization_id is not None
+            and int(organization_id)
+            != resolved_organization_id
+        ):
+            raise ValueError(
+                "El contacto no pertenece a la organización indicada."
+            )
+
+        return {
+            "recipient_type":
+                "CONTACTO",
+            "organization_id":
+                resolved_organization_id,
+            "campus_id":
+                (
+                    int(contact["campus_id"])
+                    if contact["campus_id"] is not None
+                    else None
+                ),
+            "contact_id":
+                int(contact_id),
+            "organization_name":
+                (
+                    organization_name.strip()
+                    or contact["official_name"]
+                ),
+            "recipient_name":
+                (
+                    recipient_name.strip()
+                    or contact["full_name"]
+                ),
+            "campus_name":
+                (
+                    campus_name.strip()
+                    or contact["campus_name"]
+                    or ""
+                ),
+        }
+
+    if contact_id is not None:
+        raise ValueError(
+            "Un destinatario INSTITUCIONAL no debe tener contact_id."
+        )
+
+    resolved_organization_id = (
+        int(organization_id)
+        if organization_id is not None
+        else None
+    )
+
+    resolved_campus_id = (
+        int(campus_id)
+        if campus_id is not None
+        else None
+    )
+
+    resolved_org_name = (
+        organization_name
+        or ""
+    ).strip()
+
+    resolved_campus_name = (
+        campus_name
+        or ""
+    ).strip()
+
+    if resolved_campus_id is not None:
+        campus = connection.execute(
+            """
+            SELECT
+                c.id,
+                c.organization_id,
+                c.campus_name,
+                o.official_name
+            FROM campuses c
+            JOIN organizations o
+              ON o.id = c.organization_id
+            WHERE c.id = ?
+            """,
+            (
+                resolved_campus_id,
+            ),
+        ).fetchone()
+
+        if campus is None:
+            raise ValueError(
+                "El plantel seleccionado no existe."
+            )
+
+        campus_org_id = int(
+            campus["organization_id"]
+        )
+
+        if (
+            resolved_organization_id is not None
+            and resolved_organization_id
+            != campus_org_id
+        ):
+            raise ValueError(
+                "El plantel no pertenece a la organización indicada."
+            )
+
+        resolved_organization_id = (
+            campus_org_id
+        )
+        resolved_org_name = (
+            resolved_org_name
+            or campus["official_name"]
+        )
+        resolved_campus_name = (
+            resolved_campus_name
+            or campus["campus_name"]
+        )
+
+    if resolved_organization_id is None:
+        raise ValueError(
+            "Todo destinatario requiere organization_id."
+        )
+
+    organization = connection.execute(
+        """
+        SELECT official_name
+        FROM organizations
+        WHERE id = ?
+        """,
+        (
+            resolved_organization_id,
+        ),
+    ).fetchone()
+
+    if organization is None:
+        raise ValueError(
+            "La organización seleccionada no existe."
+        )
+
+    resolved_org_name = (
+        resolved_org_name
+        or organization["official_name"]
+    )
+
+    return {
+        "recipient_type":
+            "INSTITUCIONAL",
+        "organization_id":
+            resolved_organization_id,
+        "campus_id":
+            resolved_campus_id,
+        "contact_id":
+            None,
+        "organization_name":
+            resolved_org_name,
+        "recipient_name":
+            (
+                (recipient_name or "").strip()
+                or resolved_campus_name
+                or resolved_org_name
+            ),
+        "campus_name":
+            resolved_campus_name,
+    }
+
+
 def add_campaign_recipient(
     campaign_id: int,
-    campus_id: int,
+    campus_id: int | None,
     campus_name: str,
     email_address: str,
     user_id: int,
     contact_id=None,
     email_type: str = "INSTITUCIONAL",
+    recipient_type: str | None = None,
+    organization_id: int | None = None,
+    organization_name: str = "",
+    recipient_name: str = "",
 ) -> int:
 
     email_address = (
-        email_address or ""
+        email_address
+        or ""
     ).strip().lower()
 
     if not email_address:
         return 0
+
+    valid, reason = validate_email_address(
+        email_address
+    )
+
+    if not valid:
+        raise ValueError(
+            reason
+        )
 
     if recipient_exists(
         campaign_id,
@@ -277,27 +711,52 @@ def add_campaign_recipient(
         return 0
 
     with get_connection() as connection:
+        identity = _resolve_recipient_identity(
+            connection=connection,
+            recipient_type=recipient_type or "",
+            organization_id=organization_id,
+            campus_id=campus_id,
+            contact_id=contact_id,
+            organization_name=organization_name or "",
+            recipient_name=recipient_name or "",
+            campus_name=campus_name or "",
+        )
 
         cursor = connection.execute(
             """
             INSERT INTO campaign_recipients (
                 campaign_id,
+                recipient_type,
+                organization_id,
                 campus_id,
                 contact_id,
+                organization_name_snapshot,
+                recipient_name_snapshot,
                 campus_name_snapshot,
                 email_address,
                 email_type,
-                status
+                status,
+                is_active
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'PENDIENTE')
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDIENTE', 1
+            )
             """,
             (
                 campaign_id,
-                campus_id,
-                contact_id,
-                campus_name,
+                identity["recipient_type"],
+                identity["organization_id"],
+                identity["campus_id"],
+                identity["contact_id"],
+                identity["organization_name"],
+                identity["recipient_name"],
+                identity["campus_name"] or None,
                 email_address,
-                email_type,
+                (
+                    "CONTACTO"
+                    if identity["recipient_type"] == "CONTACTO"
+                    else "INSTITUCIONAL"
+                ),
             ),
         )
 
@@ -320,7 +779,11 @@ def add_campaign_recipient(
             """,
             (
                 recipient_id,
-                "Destinatario agregado a la campaña",
+                (
+                    "Destinatario agregado a la campaña. "
+                    f"Tipo: {identity['recipient_type']}. "
+                    f"Organización: {identity['organization_name']}."
+                ),
                 user_id,
             ),
         )
@@ -340,12 +803,19 @@ def add_multiple_campaign_recipients(
     skipped = 0
 
     for recipient in recipients:
-
         recipient_id = add_campaign_recipient(
             campaign_id=campaign_id,
-            campus_id=recipient["campus_id"],
-            campus_name=recipient["campus_name"],
-            email_address=recipient["email"],
+            campus_id=recipient.get(
+                "campus_id"
+            ),
+            campus_name=recipient.get(
+                "campus_name",
+                "",
+            ),
+            email_address=recipient.get(
+                "email",
+                "",
+            ),
             user_id=user_id,
             contact_id=recipient.get(
                 "contact_id"
@@ -353,6 +823,20 @@ def add_multiple_campaign_recipients(
             email_type=recipient.get(
                 "email_type",
                 "INSTITUCIONAL",
+            ),
+            recipient_type=recipient.get(
+                "recipient_type"
+            ),
+            organization_id=recipient.get(
+                "organization_id"
+            ),
+            organization_name=recipient.get(
+                "organization_name",
+                "",
+            ),
+            recipient_name=recipient.get(
+                "recipient_name",
+                "",
             ),
         )
 
@@ -372,31 +856,52 @@ def get_campaign_recipients(
 ) -> list:
 
     with get_connection() as connection:
-
         return connection.execute(
             """
             SELECT
                 cr.id,
                 cr.campaign_id,
+
+                cr.recipient_type,
+                cr.organization_id,
                 cr.campus_id,
                 cr.contact_id,
+
+                cr.organization_name_snapshot,
+                cr.recipient_name_snapshot,
                 cr.campus_name_snapshot,
+
                 cr.email_address,
                 cr.email_type,
                 cr.status,
+                cr.is_active,
+
                 cr.sent_at,
                 cr.responded_at,
+
                 cr.referred_name,
                 cr.referred_position,
                 cr.referred_email,
                 cr.referred_phone,
+
                 cr.notes,
                 cr.created_at
+
             FROM campaign_recipients cr
+
             WHERE cr.campaign_id = ?
               AND COALESCE(cr.is_active, 1) = 1
+
             ORDER BY
-                cr.campus_name_snapshot,
+                cr.organization_name_snapshot,
+                COALESCE(
+                    cr.campus_name_snapshot,
+                    ''
+                ),
+                COALESCE(
+                    cr.recipient_name_snapshot,
+                    ''
+                ),
                 cr.email_address
             """,
             (
@@ -433,9 +938,7 @@ def update_recipient_status(
         )
 
     with get_connection() as connection:
-
         if status == "ENVIADO":
-
             connection.execute(
                 """
                 UPDATE campaign_recipients
@@ -455,7 +958,6 @@ def update_recipient_status(
             "RESPONDIO",
             "CONTACTO_REFERIDO",
         }:
-
             connection.execute(
                 """
                 UPDATE campaign_recipients
@@ -472,7 +974,6 @@ def update_recipient_status(
             )
 
         else:
-
             connection.execute(
                 """
                 UPDATE campaign_recipients
@@ -519,7 +1020,6 @@ def register_referred_contact(
 ) -> None:
 
     with get_connection() as connection:
-
         connection.execute(
             """
             UPDATE campaign_recipients
@@ -574,7 +1074,6 @@ def get_recipient_activity(
 ) -> list:
 
     with get_connection() as connection:
-
         return connection.execute(
             """
             SELECT
@@ -602,7 +1101,6 @@ def get_campaign_metrics(
 ):
 
     with get_connection() as connection:
-
         row = connection.execute(
             """
             SELECT
@@ -663,6 +1161,7 @@ def get_campaign_metrics(
 
             FROM campaign_recipients
             WHERE campaign_id = ?
+              AND COALESCE(is_active, 1) = 1
             """,
             (
                 campaign_id,
@@ -671,11 +1170,14 @@ def get_campaign_metrics(
 
     return row
 
+
 # =========================================================
 # INTENTOS DE ENVÍO Y RASTREO
 # =========================================================
 
-def get_campaign_recipient(recipient_id: int):
+def get_campaign_recipient(
+    recipient_id: int,
+):
     with get_connection() as connection:
         return connection.execute(
             """
@@ -684,7 +1186,9 @@ def get_campaign_recipient(recipient_id: int):
             WHERE id = ?
               AND COALESCE(is_active, 1) = 1
             """,
-            (recipient_id,),
+            (
+                recipient_id,
+            ),
         ).fetchone()
 
 
@@ -702,9 +1206,17 @@ def create_email_send_attempt(
             FROM email_send_attempts
             WHERE campaign_recipient_id = ?
             """,
-            (recipient_id,),
+            (
+                recipient_id,
+            ),
         ).fetchone()
-        attempt_number = int(row[0]) if row else 1
+
+        attempt_number = (
+            int(row[0])
+            if row
+            else 1
+        )
+
         cursor = connection.execute(
             """
             INSERT INTO email_send_attempts (
@@ -727,7 +1239,9 @@ def create_email_send_attempt(
                 user_id,
             ),
         )
+
         connection.commit()
+
         return cursor.lastrowid
 
 
@@ -737,11 +1251,13 @@ def mark_email_send_attempt_accepted(
     sent_folder_saved: bool,
     sent_folder_name: str = "",
 ) -> None:
+
     with get_connection() as connection:
         connection.execute(
             """
             UPDATE email_send_attempts
-            SET smtp_status = 'ACEPTADO',
+            SET
+                smtp_status = 'ACEPTADO',
                 smtp_response = ?,
                 sent_folder_saved = ?,
                 sent_folder_name = ?,
@@ -755,6 +1271,7 @@ def mark_email_send_attempt_accepted(
                 attempt_id,
             ),
         )
+
         connection.commit()
 
 
@@ -762,30 +1279,33 @@ def mark_email_send_attempt_error(
     attempt_id: int,
     error_message: str,
 ) -> None:
+
     with get_connection() as connection:
         connection.execute(
             """
             UPDATE email_send_attempts
-            SET smtp_status = 'ERROR',
+            SET
+                smtp_status = 'ERROR',
                 smtp_response = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (error_message, attempt_id),
+            (
+                error_message,
+                attempt_id,
+            ),
         )
+
         connection.commit()
 
 
 # =========================================================
-# ARCHIVO Y CORRECCIÓN DE DESTINATARIOS
+# ARCHIVO E INCIDENCIAS
 # =========================================================
 
 def get_archived_campaign_recipients(
     campaign_id: int,
 ) -> list:
-    """
-    Devuelve destinatarios archivados para consulta histórica.
-    """
 
     with get_connection() as connection:
         return connection.execute(
@@ -793,7 +1313,12 @@ def get_archived_campaign_recipients(
             SELECT
                 id,
                 campaign_id,
+                recipient_type,
+                organization_id,
                 campus_id,
+                contact_id,
+                organization_name_snapshot,
+                recipient_name_snapshot,
                 campus_name_snapshot,
                 email_address,
                 status,
@@ -802,19 +1327,20 @@ def get_archived_campaign_recipients(
             FROM campaign_recipients
             WHERE campaign_id = ?
               AND COALESCE(is_active, 1) = 0
-            ORDER BY campus_name_snapshot, email_address
+            ORDER BY
+                organization_name_snapshot,
+                recipient_name_snapshot,
+                email_address
             """,
-            (campaign_id,),
+            (
+                campaign_id,
+            ),
         ).fetchall()
 
 
 def get_active_delivery_incidents(
     campaign_id: int,
 ) -> list:
-    """
-    Devuelve errores y rebotes activos con el diagnóstico
-    técnico más reciente disponible.
-    """
 
     with get_connection() as connection:
         return connection.execute(
@@ -822,8 +1348,16 @@ def get_active_delivery_incidents(
             SELECT
                 cr.id,
                 cr.campaign_id,
+
+                cr.recipient_type,
+                cr.organization_id,
                 cr.campus_id,
+                cr.contact_id,
+
+                cr.organization_name_snapshot,
+                cr.recipient_name_snapshot,
                 cr.campus_name_snapshot,
+
                 cr.email_address,
                 cr.status,
 
@@ -867,7 +1401,10 @@ def get_active_delivery_incidents(
                     SELECT ea.details
                     FROM email_activity ea
                     WHERE ea.campaign_recipient_id = cr.id
-                      AND ea.event_type IN ('ERROR', 'REBOTE')
+                      AND ea.event_type IN (
+                          'ERROR',
+                          'REBOTE'
+                      )
                     ORDER BY ea.id DESC
                     LIMIT 1
                 ) AS activity_details
@@ -879,24 +1416,36 @@ def get_active_delivery_incidents(
 
             WHERE cr.campaign_id = ?
               AND COALESCE(cr.is_active, 1) = 1
-              AND cr.status IN ('ERROR', 'REBOTE')
+              AND cr.status IN (
+                  'ERROR',
+                  'REBOTE'
+              )
 
             GROUP BY
                 cr.id,
                 cr.campaign_id,
+                cr.recipient_type,
+                cr.organization_id,
                 cr.campus_id,
+                cr.contact_id,
+                cr.organization_name_snapshot,
+                cr.recipient_name_snapshot,
                 cr.campus_name_snapshot,
                 cr.email_address,
                 cr.status
 
             ORDER BY
                 CASE
-                    WHEN cr.status = 'ERROR' THEN 0
+                    WHEN cr.status = 'ERROR'
+                    THEN 0
                     ELSE 1
                 END,
-                cr.campus_name_snapshot
+                cr.organization_name_snapshot,
+                cr.recipient_name_snapshot
             """,
-            (campaign_id,),
+            (
+                campaign_id,
+            ),
         ).fetchall()
 
 
@@ -905,14 +1454,11 @@ def archive_invalid_error_recipients(
     user_id: int,
     reason: str,
 ) -> dict:
-    """
-    Archiva errores cuyo valor no tiene formato de correo.
 
-    Conserva intentos y actividad. Solo deja de mostrarlos
-    en la operación activa de la campaña.
-    """
-
-    reason = (reason or "").strip()
+    reason = (
+        reason
+        or ""
+    ).strip()
 
     if not reason:
         raise ValueError(
@@ -924,14 +1470,15 @@ def archive_invalid_error_recipients(
             """
             SELECT
                 id,
-                email_address,
-                campus_name_snapshot
+                email_address
             FROM campaign_recipients
             WHERE campaign_id = ?
               AND COALESCE(is_active, 1) = 1
               AND status = 'ERROR'
             """,
-            (campaign_id,),
+            (
+                campaign_id,
+            ),
         ).fetchall()
 
         invalid_rows = []
@@ -942,7 +1489,9 @@ def archive_invalid_error_recipients(
             )
 
             if not is_valid:
-                invalid_rows.append(row)
+                invalid_rows.append(
+                    row
+                )
 
         if not invalid_rows:
             return {
@@ -950,7 +1499,9 @@ def archive_invalid_error_recipients(
             }
 
         try:
-            connection.execute("BEGIN")
+            connection.execute(
+                "BEGIN"
+            )
 
             for row in invalid_rows:
                 connection.execute(
@@ -961,7 +1512,9 @@ def archive_invalid_error_recipients(
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
-                    (int(row["id"]),),
+                    (
+                        int(row["id"]),
+                    ),
                 )
 
                 connection.execute(
@@ -1007,6 +1560,40 @@ def archive_invalid_error_recipients(
     }
 
 
+def _master_email_owner(
+    current,
+) -> tuple[str, int, str]:
+    """
+    Devuelve:
+        entity_type, entity_id, default_email_type
+    """
+
+    if current["recipient_type"] == "CONTACTO":
+        if current["contact_id"] is None:
+            raise ValueError(
+                "El destinatario CONTACTO no tiene contact_id."
+            )
+
+        return (
+            "CONTACT",
+            int(current["contact_id"]),
+            "DIRECTO",
+        )
+
+    if current["campus_id"] is not None:
+        return (
+            "CAMPUS",
+            int(current["campus_id"]),
+            "INSTITUCIONAL",
+        )
+
+    return (
+        "ORGANIZATION",
+        int(current["organization_id"]),
+        "INSTITUCIONAL",
+    )
+
+
 def correct_campaign_recipient_email(
     recipient_id: int,
     new_email: str,
@@ -1014,13 +1601,11 @@ def correct_campaign_recipient_email(
     reason: str,
     update_master: bool = True,
 ) -> dict:
-    """
-    Conserva el destinatario anterior como historial,
-    corrige el correo maestro del plantel y crea un nuevo
-    destinatario PENDIENTE para reenvío individual.
-    """
 
-    reason = (reason or "").strip()
+    reason = (
+        reason
+        or ""
+    ).strip()
 
     if not reason:
         raise ValueError(
@@ -1038,8 +1623,15 @@ def correct_campaign_recipient_email(
             validation_reason
         )
 
-    new_email = new_email.strip().lower()
-    normalized = normalize_email(new_email)
+    new_email = (
+        new_email
+        .strip()
+        .lower()
+    )
+
+    normalized = normalize_email(
+        new_email
+    )
 
     with get_connection() as connection:
         current = connection.execute(
@@ -1049,7 +1641,9 @@ def correct_campaign_recipient_email(
             WHERE id = ?
               AND COALESCE(is_active, 1) = 1
             """,
-            (recipient_id,),
+            (
+                recipient_id,
+            ),
         ).fetchone()
 
         if current is None:
@@ -1069,13 +1663,15 @@ def correct_campaign_recipient_email(
             """
             SELECT
                 id,
-                campus_name_snapshot,
+                organization_name_snapshot,
+                recipient_name_snapshot,
                 email_address,
                 status,
                 COALESCE(is_active, 1) AS is_active
             FROM campaign_recipients
             WHERE campaign_id = ?
-              AND LOWER(TRIM(email_address)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(email_address))
+                  = LOWER(TRIM(?))
               AND id <> ?
             ORDER BY
                 COALESCE(is_active, 1) DESC,
@@ -1092,38 +1688,61 @@ def correct_campaign_recipient_email(
         if duplicate:
             activity = (
                 "activo"
-                if int(duplicate["is_active"] or 0) == 1
+                if int(
+                    duplicate["is_active"]
+                    or 0
+                ) == 1
                 else "archivado"
             )
 
             raise ValueError(
                 "El correo corregido ya existe en esta campaña. "
-                f"Plantel: {duplicate['campus_name_snapshot']}. "
+                f"Organización: "
+                f"{duplicate['organization_name_snapshot']}. "
+                f"Destinatario: "
+                f"{duplicate['recipient_name_snapshot'] or ''}. "
                 f"Estado: {duplicate['status']} ({activity}). "
-                "Selecciona esa incidencia o captura otro correo "
-                "validado. No se realizó ningún cambio."
+                "No se realizó ningún cambio."
             )
 
         try:
-            connection.execute("BEGIN")
+            connection.execute(
+                "BEGIN"
+            )
 
             master_updated = False
 
             if update_master:
+                (
+                    entity_type,
+                    entity_id,
+                    master_email_type,
+                ) = _master_email_owner(
+                    current
+                )
+
                 master_email = connection.execute(
                     """
-                    SELECT id, email, status
+                    SELECT
+                        id,
+                        email,
+                        status
                     FROM emails
-                    WHERE entity_type = 'CAMPUS'
+                    WHERE entity_type = ?
                       AND entity_id = ?
                       AND LOWER(email) = LOWER(?)
                     ORDER BY
-                        CASE WHEN status = 'ACTIVO' THEN 0 ELSE 1 END,
+                        CASE
+                            WHEN status = 'ACTIVO'
+                            THEN 0
+                            ELSE 1
+                        END,
                         id DESC
                     LIMIT 1
                     """,
                     (
-                        current["campus_id"],
+                        entity_type,
+                        entity_id,
                         current["email_address"],
                     ),
                 ).fetchone()
@@ -1141,7 +1760,9 @@ def correct_campaign_recipient_email(
                         (
                             new_email,
                             normalized,
-                            int(master_email["id"]),
+                            int(
+                                master_email["id"]
+                            ),
                         ),
                     )
 
@@ -1168,7 +1789,9 @@ def correct_campaign_recipient_email(
                         """,
                         (
                             user_id,
-                            int(master_email["id"]),
+                            int(
+                                master_email["id"]
+                            ),
                             master_email["email"],
                             (
                                 f"{new_email} | "
@@ -1176,8 +1799,6 @@ def correct_campaign_recipient_email(
                             ),
                         ),
                     )
-
-                    master_updated = True
 
                 else:
                     cursor = connection.execute(
@@ -1193,15 +1814,16 @@ def correct_campaign_recipient_email(
                             created_by
                         )
                         VALUES (
-                            'CAMPUS',
-                            ?, ?, ?, 'INSTITUCIONAL',
+                            ?, ?, ?, ?, ?,
                             1, 'ACTIVO', ?
                         )
                         """,
                         (
-                            current["campus_id"],
+                            entity_type,
+                            entity_id,
                             new_email,
                             normalized,
+                            master_email_type,
                             user_id,
                         ),
                     )
@@ -1241,7 +1863,7 @@ def correct_campaign_recipient_email(
                         ),
                     )
 
-                    master_updated = True
+                master_updated = True
 
             connection.execute(
                 """
@@ -1251,7 +1873,9 @@ def correct_campaign_recipient_email(
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (recipient_id,),
+                (
+                    recipient_id,
+                ),
             )
 
             connection.execute(
@@ -1289,8 +1913,12 @@ def correct_campaign_recipient_email(
                 """
                 INSERT INTO campaign_recipients (
                     campaign_id,
+                    recipient_type,
+                    organization_id,
                     campus_id,
                     contact_id,
+                    organization_name_snapshot,
+                    recipient_name_snapshot,
                     campus_name_snapshot,
                     email_address,
                     email_type,
@@ -1298,14 +1926,25 @@ def correct_campaign_recipient_email(
                     is_active
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, 'PENDIENTE', 1
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    'PENDIENTE', 1
                 )
                 """,
                 (
                     current["campaign_id"],
+                    current["recipient_type"],
+                    current["organization_id"],
                     current["campus_id"],
                     current["contact_id"],
-                    current["campus_name_snapshot"],
+                    current[
+                        "organization_name_snapshot"
+                    ],
+                    current[
+                        "recipient_name_snapshot"
+                    ],
+                    current[
+                        "campus_name_snapshot"
+                    ],
                     new_email,
                     current["email_type"],
                 ),
@@ -1335,7 +1974,8 @@ def correct_campaign_recipient_email(
                     (
                         "Destinatario creado después de "
                         "corregir un error de correo. "
-                        f"Anterior: {current['email_address']}. "
+                        f"Anterior: "
+                        f"{current['email_address']}. "
                         f"Motivo: {reason}"
                     ),
                     user_id,
@@ -1366,9 +2006,6 @@ def correct_campaign_recipient_email(
 def get_active_campaign_status_counts(
     campaign_id: int,
 ) -> dict:
-    """
-    Conteos operativos de destinatarios activos.
-    """
 
     with get_connection() as connection:
         rows = connection.execute(
@@ -1381,7 +2018,9 @@ def get_active_campaign_status_counts(
               AND COALESCE(is_active, 1) = 1
             GROUP BY status
             """,
-            (campaign_id,),
+            (
+                campaign_id,
+            ),
         ).fetchall()
 
     counts = {
@@ -1396,10 +2035,15 @@ def get_active_campaign_status_counts(
     }
 
     for row in rows:
-        counts[row["status"]] = int(
-            row["total"] or 0
+        counts[
+            row["status"]
+        ] = int(
+            row["total"]
+            or 0
         )
 
-    counts["TOTAL"] = sum(counts.values())
+    counts["TOTAL"] = sum(
+        counts.values()
+    )
 
     return counts
